@@ -1,69 +1,99 @@
 pipeline {
     agent any
-    
     environment {
         AWS_REGION = 'us-east-1'
         TERRAFORM_DIR = '.'
-        GITHUB_REPO_URL = 'https://github.com/babatundeoloyeX/autoscale-2.git'
     }
-    
+
     options {
-        // Add timeout and cleanup options
+        // add safety to prevent multiple executions at the same time
         timeout(time: 1, unit: 'HOURS')
         disableConcurrentBuilds()
+        // add warning parameter
+        buildDiscarder(logRotator(numToKeepStr: '10'))
     }
-    
+
     stages {
+        stage('Warning Message') {
+            steps {
+                // display warning message
+                script {
+                    currentBuild.displayName = "${BUILD_NUMBER} - destroy infrastucture"
+                    echo "This pipeline will destroy the infrastucture in ${AWS_REGION}"
+                }
+            }
+        }
+
+        stage('Initial Approval') {
+            steps {
+                // require explicit approval to proceed with destroy
+                input message: "Are you sure you want to destroy?",
+                    ok: "Yes, Destroy",
+                    parameters: [
+                        string(name: 'CONFIRMATION_TEXT',
+                        description: 'Type "DESTROY" to confirm',
+                        trim: true)
+                    ]
+
+                script {
+                    if (params.CONFIRMATION_TEXT != 'DESTROY') {
+                        error "Destruction aborted: Confirmation text did not match 'DESTROY'"
+                    }
+                }
+            }
+        }
+
         stage('Cleanup Workspace') {
             steps {
                 cleanWs()
             }
         }
-        
+
         stage('Checkout Code') {
             steps {
-                git branch: 'main', 
-                    url: "${GITHUB_REPO_URL}"
+                git branch: 'main',
+                url: 'https://github.com/SerginoDelia/autoScale/'
             }
         }
-        
-        stage('Terraform Init & Plan') {
+
+        stage('Terraform Init and Plan Destroy') {
             steps {
                 withAWS {
                     sh '''
                         terraform init
-                        terraform plan -out=tfplan
+                        terraform plan -destroy -out=tfdestroyplan
                     '''
                 }
             }
         }
-        
-        stage('Approval') {
+
+        stage('Final Approval') {
             steps {
-                input message: "Do you want to apply the terraform plan?",
-                      ok: "Apply Plan"
+                // show plan and require final approval
+                input message: "Review the destroy plan, Do you want to destroy",
+                    ok: "Yes, Destroy"
             }
         }
-        
-        stage('Terraform Apply') {
+
+        stage('Terraform Destroy') {
             steps {
                 withAWS {
-                    sh 'terraform apply -auto-approve tfplan'
+                    sh 'terraform apply -auto-approve tfdestroyplan'
                 }
             }
         }
     }
-    
+
     post {
         always {
-            // Clean up terraform files
-            sh 'rm -f tfplan'
+            // Cleanup terraform files
+            sh 'rm -f tfdestroyplan'
         }
         success {
-            echo 'Infrastructure deployment completed successfully!'
+            echo 'Destruction completed successfully!'
         }
         failure {
-            echo 'Infrastructure deployment failed!'
+            echo 'Destruction failed'
         }
         cleanup {
             cleanWs()
@@ -71,7 +101,8 @@ pipeline {
     }
 }
 
-// Define a helper method for AWS credentials
+// define function for AWS Credentials
+
 def withAWS(Closure body) {
     withCredentials([[
         $class: 'AmazonWebServicesCredentialsBinding',
@@ -82,6 +113,5 @@ def withAWS(Closure body) {
             export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
             export AWS_REGION=$AWS_REGION
         """
-        body()
     }
 }
